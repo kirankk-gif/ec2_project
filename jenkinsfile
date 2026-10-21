@@ -47,7 +47,7 @@ pipeline {
                     npm --version
                 '''
 
-                sshagent(credentials: ['ec2-ssh-key']) {
+                sshagent(credentials: ['ssh-newec2-key']) {
                     sh '''
                         set -eu
 
@@ -185,7 +185,7 @@ REMOTE
         // 4. Copy frontend dist contents to EC2.
         stage('Deploy Frontend') {
             steps {
-                sshagent(credentials: ['ec2-ssh-key']) {
+                sshagent(credentials: ['ssh-newec2-key']) {
                     sh '''
                         set -eu
 
@@ -206,7 +206,7 @@ REMOTE
         // 5. Copy complete backend source to EC2.
         stage('Deploy Backend Source') {
             steps {
-                sshagent(credentials: ['ec2-ssh-key']) {
+                sshagent(credentials: ['ssh-newec2-key']) {
                     sh '''
                         set -eu
 
@@ -238,7 +238,7 @@ REMOTE
         // 6. Download .env from S3 using the EC2 IAM role.
         stage('Download ENV from S3') {
             steps {
-                sshagent(credentials: ['ec2-ssh-key']) {
+                sshagent(credentials: ['ssh-newec2-key']) {
                     sh '''
                         set -eu
 
@@ -263,7 +263,7 @@ REMOTE
         // 7. Enable and start MongoDB.
         stage('MongoDB Start and Status') {
             steps {
-                sshagent(credentials: ['ec2-ssh-key']) {
+                sshagent(credentials: ['ssh-newec2-key']) {
                     sh '''
                         set -eu
 
@@ -298,7 +298,7 @@ REMOTE
         // 8. Install backend dependencies on EC2.
         stage('Backend npm install') {
             steps {
-                sshagent(credentials: ['ec2-ssh-key']) {
+                sshagent(credentials: ['ssh-newec2-key']) {
                     sh '''
                         set -eu
 
@@ -317,7 +317,7 @@ REMOTE
         // 9. Start backend with PM2 and print recent logs.
         stage('PM2 Start and Logs') {
             steps {
-                sshagent(credentials: ['ec2-ssh-key']) {
+                sshagent(credentials: ['ssh-newec2-key']) {
                     sh '''
                         set -eu
 
@@ -353,7 +353,7 @@ REMOTE
         // 10. Configure Nginx to serve the frontend and proxy the API.
         stage('Nginx Configuration') {
             steps {
-                sshagent(credentials: ['ec2-ssh-key']) {
+                sshagent(credentials: ['ssh-newec2-key']) {
                     sh '''
                         set -eu
 
@@ -409,7 +409,7 @@ REMOTE
         // 11. Verify frontend and API through Nginx.
         stage('Website Verification') {
             steps {
-                sshagent(credentials: ['ec2-ssh-key']) {
+                sshagent(credentials: ['ssh-newec2-key']) {
                     sh '''
                         set -eu
 
