@@ -1,0 +1,464 @@
+
+pipeline {
+    agent any
+
+    options {
+        timestamps()
+        disableConcurrentBuilds()
+    }
+
+    environment {
+        EC2_HOST       = '3.106.194.176'
+        EC2_USER       = 'ubuntu'
+        SSH_CREDENTIAL = 'ec2-ssh-key'
+
+        FRONTEND_DIR   = '/var/www/html/ec2_project/app'
+        BACKEND_DIR    = '/var/www/html/ec2_project/api'
+
+        S3_BUCKET  = 'kiran-ec2-s3-lab-7f29c1'
+        S3_ENV_KEY = 'task-abroad-api/.env'
+
+        APP_NAME       = 'ec2-project-api'
+        APP_PORT       = '5000'
+        HEALTH_PATH    = '/api/health'
+    }
+
+    stages {
+
+        // 1. Check requirements BEFORE checkout
+        stage('Requirements Check') {
+            steps {
+                echo 'Checking Jenkins agent requirements...'
+
+                sh '''
+                    set -eu
+
+                    command -v node >/dev/null 2>&1 || {
+                        echo "ERROR: Node.js is missing on Jenkins agent."
+                        exit 1
+                    }
+
+                    command -v npm >/dev/null 2>&1 || {
+                        echo "ERROR: npm is missing on Jenkins agent."
+                        exit 1
+                    }
+
+                    node --version
+                    npm --version
+                '''
+
+                sshagent(credentials: ['ec2-ssh-key']) {
+                    sh '''
+                        set -eu
+
+                        ssh -o StrictHostKeyChecking=accept-new \
+                          "$EC2_USER@$EC2_HOST" 'bash -s' <<'REMOTE'
+                        set -eu
+
+                        echo "Checking EC2 requirements..."
+
+                        sudo -n true
+
+                        sudo -n apt-get update -y
+                        sudo -n apt-get install -y \
+                          awscli curl gnupg ca-certificates nginx
+
+                        # Install Node.js 20 if missing or too old.
+                        NODE_MAJOR=0
+
+                        if command -v node >/dev/null 2>&1; then
+                            NODE_MAJOR=$(node -p \
+                              "Number(process.versions.node.split('.')[0])")
+                        fi
+
+                        if [ "$NODE_MAJOR" -lt 20 ]; then
+                            curl -fsSL \
+                              https://deb.nodesource.com/setup_20.x \
+                              -o /tmp/node-setup.sh
+
+                            sudo -n bash /tmp/node-setup.sh
+                            sudo -n apt-get install -y nodejs
+                            rm -f /tmp/node-setup.sh
+                        fi
+
+                        node --version
+                        npm --version
+
+                        # Install PM2 if missing.
+                        if ! command -v pm2 >/dev/null 2>&1; then
+                            sudo -n npm install -g pm2
+                        fi
+
+                        pm2 --version
+
+                        # Install MongoDB Server if missing.
+                        if ! command -v mongod >/dev/null 2>&1; then
+                            . /etc/os-release
+
+                            if [ "$ID" != "ubuntu" ] ||
+                               [ "$VERSION_ID" != "24.04" ]; then
+                                echo "ERROR: Automatic MongoDB installation supports Ubuntu 24.04 only."
+                                exit 1
+                            fi
+
+                            ARCH=$(dpkg --print-architecture)
+
+                            if [ "$ARCH" != "amd64" ] &&
+                               [ "$ARCH" != "arm64" ]; then
+                                echo "ERROR: Unsupported architecture: $ARCH"
+                                exit 1
+                            fi
+
+                            curl -fsSL \
+                              https://pgp.mongodb.com/server-8.0.asc |
+                              sudo -n gpg --dearmor --yes \
+                              -o /usr/share/keyrings/mongodb-server-8.0.gpg
+
+                            echo "deb [ arch=$ARCH signed-by=/usr/share/keyrings/mongodb-server-8.0.gpg ] https://repo.mongodb.org/apt/ubuntu noble/mongodb-org/8.0 multiverse" |
+                              sudo -n tee \
+                              /etc/apt/sources.list.d/mongodb-org-8.0.list
+
+                            sudo -n apt-get update -y
+                            sudo -n apt-get install -y mongodb-org
+                        fi
+
+                        mongod --version | head -n 2
+
+                        # Check AWS CLI and the EC2 IAM identity.
+                        aws --version
+                        aws sts get-caller-identity
+
+                        # Check Nginx.
+                        nginx -v
+
+                        # Prepare deployment directories.
+                        sudo -n mkdir -p \
+                          /var/www/html/ec2_project/app \
+                          /var/www/html/ec2_project/api
+
+                        sudo -n chown -R \
+                          "$USER":"$(id -gn)" \
+                          /var/www/html/ec2_project
+
+                        echo "Requirements check completed."
+REMOTE
+                    '''
+                }
+            }
+        }
+
+        // 2. Get repository and branch from Jenkins job configuration.
+        stage('Checkout') {
+            steps {
+                checkout scm
+                sh '''
+                    echo "Repository checked out."
+                    ls -la
+                '''
+            }
+        }
+
+        // 3. Build frontend on Jenkins agent.
+        stage('Build Frontend') {
+            steps {
+                dir('frontend') {
+                    sh '''
+                        set -eu
+
+                        test -f package.json
+
+                        if [ -f package-lock.json ]; then
+                            npm ci
+                        else
+                            npm install
+                        fi
+
+                        npm run build
+
+                        test -f dist/index.html
+                        echo "Frontend build completed."
+                    '''
+                }
+            }
+        }
+
+        // 4. Copy frontend dist contents to EC2.
+        stage('Deploy Frontend') {
+            steps {
+                sshagent(credentials: ['ec2-ssh-key']) {
+                    sh '''
+                        set -eu
+
+                        test -f frontend/dist/index.html
+
+                        ssh "$EC2_USER@$EC2_HOST" \
+                          "mkdir -p '$FRONTEND_DIR'"
+
+                        scp -r frontend/dist/. \
+                          "$EC2_USER@$EC2_HOST:$FRONTEND_DIR/"
+
+                        echo "Frontend copied to EC2."
+                    '''
+                }
+            }
+        }
+
+        // 5. Copy complete backend source to EC2.
+        stage('Deploy Backend Source') {
+            steps {
+                sshagent(credentials: ['ec2-ssh-key']) {
+                    sh '''
+                        set -eu
+
+                        test -f backend/package.json
+                        test -f backend/src/server.js
+
+                        tar -czf backend.tar.gz \
+                          --exclude=node_modules \
+                          --exclude=.env \
+                          --exclude=.git \
+                          -C backend .
+
+                        scp backend.tar.gz \
+                          "$EC2_USER@$EC2_HOST:/tmp/ec2-project-backend.tar.gz"
+
+                        ssh "$EC2_USER@$EC2_HOST" \
+                          "tar -xzf /tmp/ec2-project-backend.tar.gz \
+                           -C '$BACKEND_DIR' &&
+                           rm -f /tmp/ec2-project-backend.tar.gz"
+
+                        rm -f backend.tar.gz
+
+                        echo "Backend source copied to EC2."
+                    '''
+                }
+            }
+        }
+
+        // 6. Download .env from S3 using the EC2 IAM role.
+        stage('Download ENV from S3') {
+            steps {
+                sshagent(credentials: ['ec2-ssh-key']) {
+                    sh '''
+                        set -eu
+
+                        ssh "$EC2_USER@$EC2_HOST" \
+                          "aws s3 cp \
+                           's3://$S3_BUCKET/$S3_ENV_KEY' \
+                           /tmp/ec2-project.env &&
+                           sudo install \
+                           -o '$EC2_USER' \
+                           -g '$EC2_USER' \
+                           -m 600 \
+                           /tmp/ec2-project.env \
+                           '$BACKEND_DIR/.env' &&
+                           rm -f /tmp/ec2-project.env"
+
+                        echo ".env downloaded securely from S3."
+                    '''
+                }
+            }
+        }
+
+        // 7. Enable and start MongoDB.
+        stage('MongoDB Start and Status') {
+            steps {
+                sshagent(credentials: ['ec2-ssh-key']) {
+                    sh '''
+                        set -eu
+
+                        ssh "$EC2_USER@$EC2_HOST" 'bash -s' <<'REMOTE'
+                        set -eu
+
+                        if ! command -v mongod >/dev/null 2>&1; then
+                            echo "ERROR: MongoDB Server is not installed."
+                            exit 1
+                        fi
+
+                        sudo -n systemctl enable mongod
+                        sudo -n systemctl start mongod
+                        sudo -n systemctl is-active --quiet mongod
+                        sudo -n systemctl status mongod --no-pager
+
+                        if command -v mongosh >/dev/null 2>&1; then
+                            mongosh --quiet \
+                              'mongodb://127.0.0.1:27017/task_manager' \
+                              --eval 'db.runCommand({ping:1})'
+                        else
+                            echo "mongosh not installed; MongoDB service is running."
+                        fi
+
+                        echo "MongoDB check completed."
+REMOTE
+                    '''
+                }
+            }
+        }
+
+        // 8. Install backend dependencies on EC2.
+        stage('Backend npm install') {
+            steps {
+                sshagent(credentials: ['ec2-ssh-key']) {
+                    sh '''
+                        set -eu
+
+                        ssh "$EC2_USER@$EC2_HOST" \
+                          "cd '$BACKEND_DIR' &&
+                           test -f package.json &&
+                           test -f .env &&
+                           npm install --omit=dev"
+
+                        echo "Backend dependencies installed."
+                    '''
+                }
+            }
+        }
+
+        // 9. Start backend with PM2 and print recent logs.
+        stage('PM2 Start and Logs') {
+            steps {
+                sshagent(credentials: ['ec2-ssh-key']) {
+                    sh '''
+                        set -eu
+
+                        ssh "$EC2_USER@$EC2_HOST" 'bash -s' <<'REMOTE'
+                        set -eu
+
+                        cd /var/www/html/ec2_project/api
+
+                        if pm2 describe ec2-project-api >/dev/null 2>&1; then
+                            pm2 restart ec2-project-api --update-env
+                        else
+                            pm2 start src/server.js \
+                              --name ec2-project-api
+                        fi
+
+                        pm2 save
+                        pm2 status
+
+                        # Print logs and exit; do not hang the pipeline.
+                        pm2 logs ec2-project-api \
+                          --lines 30 --nostream
+
+                        pm2 describe ec2-project-api |
+                          grep -q 'online'
+
+                        echo "PM2 backend check completed."
+REMOTE
+                    '''
+                }
+            }
+        }
+
+        // 10. Configure Nginx to serve the frontend and proxy the API.
+        stage('Nginx Configuration') {
+            steps {
+                sshagent(credentials: ['ec2-ssh-key']) {
+                    sh '''
+                        set -eu
+
+                        ssh "$EC2_USER@$EC2_HOST" 'bash -s' <<'REMOTE'
+                        set -eu
+
+                        sudo -n tee \
+                          /etc/nginx/sites-available/ec2_project \
+                          >/dev/null <<'NGINX'
+server {
+    listen 80;
+    listen [::]:80;
+
+    server_name _;
+
+    root /var/www/html/ec2_project/app;
+    index index.html;
+
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+
+    location /api/ {
+        proxy_pass http://127.0.0.1:5000/api/;
+        proxy_http_version 1.1;
+
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
+NGINX
+
+                        sudo -n ln -sfn \
+                          /etc/nginx/sites-available/ec2_project \
+                          /etc/nginx/sites-enabled/ec2_project
+
+                        sudo -n rm -f \
+                          /etc/nginx/sites-enabled/default
+
+                        sudo -n nginx -t
+                        sudo -n systemctl enable nginx
+                        sudo -n systemctl reload nginx
+
+                        echo "Nginx configured successfully."
+REMOTE
+                    '''
+                }
+            }
+        }
+
+        // 11. Verify frontend and API through Nginx.
+        stage('Website Verification') {
+            steps {
+                sshagent(credentials: ['ec2-ssh-key']) {
+                    sh '''
+                        set -eu
+
+                        ssh "$EC2_USER@$EC2_HOST" 'bash -s' <<'REMOTE'
+                        set -eu
+
+                        echo "Checking backend directly..."
+
+                        curl --fail --silent --show-error \
+                          http://127.0.0.1:5000/api/health
+
+                        echo
+                        echo "Checking API through Nginx..."
+
+                        curl --fail --silent --show-error \
+                          http://127.0.0.1/api/health
+
+                        echo
+                        echo "Checking frontend through Nginx..."
+
+                        curl --fail --silent --show-error \
+                          http://127.0.0.1/ \
+                          -o /tmp/ec2-project-index.html
+
+                        grep -qi '<html' \
+                          /tmp/ec2-project-index.html
+
+                        rm -f /tmp/ec2-project-index.html
+
+                        echo "Frontend and API checks passed."
+REMOTE
+                    '''
+                }
+            }
+        }
+    }
+
+    post {
+        success {
+            echo 'Deployment succeeded!'
+            echo 'Website: http://3.106.194.176/'
+        }
+
+        failure {
+            echo 'Deployment failed. Check the first failed stage in Console Output.'
+        }
+
+        always {
+            echo 'Jenkins pipeline finished.'
+        }
+    }
+}
