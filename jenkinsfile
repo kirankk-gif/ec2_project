@@ -24,6 +24,99 @@ pipeline {
     }
 
     stages {
+        
+            stage('Kernel Setup and Reboot') {
+                steps {
+                    sshagent(credentials: ['ssh-newec2-key']) {
+                        sh '''
+                            set -eu
+
+                            TARGET="$EC2_USER@$EC2_HOST"
+                            KERNEL="6.8.0-1008-aws"
+
+                            echo "Checking current EC2 kernel..."
+                            CURRENT=$(ssh -o BatchMode=yes -o ConnectTimeout=10 "$TARGET" 'uname -r')
+                            echo "Current kernel: $CURRENT"
+
+                            if [ "$CURRENT" = "$KERNEL" ]; then
+                                echo "Required kernel is already running. No reboot needed."
+                            else
+                                echo "Ensuring kernel package is installed..."
+
+                                ssh "$TARGET" "
+                                    set -e
+                                    if ! dpkg-query -W -f='\\${Status}' linux-image-$KERNEL 2>/dev/null |
+                                        grep -q 'install ok installed'; then
+                                        sudo -n apt-get update -y
+                                        sudo -n apt-get install -y linux-image-$KERNEL
+                                    fi
+
+                                    test -f /boot/vmlinuz-$KERNEL
+
+                                    sudo -n cp -n /etc/default/grub /etc/default/grub.backup
+
+                                    sudo -n sed -i 's|^GRUB_DEFAULT=.*|GRUB_DEFAULT=\"Advanced options for Ubuntu>Ubuntu, with Linux $KERNEL\"|' /etc/default/grub
+
+                                    sudo -n update-grub
+                                "
+
+                                echo "Scheduling reboot..."
+                                ssh "$TARGET" \
+                                    'sudo -n systemd-run --unit="jenkins-kernel-reboot-$(date +%s)" --on-active=5s /usr/sbin/reboot'
+
+                                # Wait for SSH to disconnect, confirming reboot began.
+                                DOWN=false
+                                for i in $(seq 1 12); do
+                                    sleep 5
+                                    if ! ssh -o BatchMode=yes \
+                                            -o ConnectTimeout=5 \
+                                            -o ConnectionAttempts=1 \
+                                            "$TARGET" 'true' 2>/dev/null; then
+                                        DOWN=true
+                                        break
+                                    fi
+                                done
+
+                                if [ "$DOWN" != true ]; then
+                                    echo "ERROR: EC2 did not disconnect as expected."
+                                    exit 1
+                                fi
+
+                                echo "Reboot detected. Waiting for SSH..."
+
+                                # Wait up to 5 minutes for SSH to return.
+                                CONNECTED=false
+                                for i in $(seq 1 60); do
+                                    sleep 5
+                                    if ssh -o BatchMode=yes \
+                                        -o ConnectTimeout=5 \
+                                        -o ConnectionAttempts=1 \
+                                        "$TARGET" 'true' 2>/dev/null; then
+                                        CONNECTED=true
+                                        break
+                                    fi
+                                    echo "Waiting for EC2... attempt $i/60"
+                                done
+
+                                if [ "$CONNECTED" != true ]; then
+                                    echo "ERROR: SSH did not return within 5 minutes."
+                                    exit 1
+                                fi
+                            fi
+
+                            CURRENT=$(ssh -o BatchMode=yes -o ConnectTimeout=10 "$TARGET" 'uname -r')
+                            echo "Verified running kernel: $CURRENT"
+
+                            if [ "$CURRENT" != "$KERNEL" ]; then
+                                echo "ERROR: Expected $KERNEL but found $CURRENT."
+                                exit 1
+                            fi
+
+                            echo "Kernel verification passed."
+                        '''
+                    }
+                }
+            }
 
         // 1. Check requirements BEFORE checkout
         
@@ -133,59 +226,6 @@ pipeline {
 
                         pm2 --version
                         
-
-                        # Install and configure Linux kernel 6.8 AWS.
-                        TARGET_KERNEL="6.8.0-1008-aws"
-                        KERNEL_PACKAGE="linux-image-${TARGET_KERNEL}"
-
-                        echo "Checking Linux kernel prerequisites..."
-
-                        # Install the target kernel only if it is missing.
-                        if ! dpkg-query -W -f='${Status}' "$KERNEL_PACKAGE" 2>/dev/null |
-                            grep -q "install ok installed"; then
-
-                            echo "Kernel $TARGET_KERNEL is missing. Installing..."
-
-                            sudo -n apt-get update -y
-                            sudo -n apt-get install -y "$KERNEL_PACKAGE"
-                        else
-                            echo "Kernel $TARGET_KERNEL is already installed."
-                        fi
-
-                        # Verify that the target kernel exists.
-                        if [ ! -f "/boot/vmlinuz-${TARGET_KERNEL}" ]; then
-                            echo "ERROR: Kernel image not found: /boot/vmlinuz-${TARGET_KERNEL}"
-                            exit 1
-                        fi
-
-                        # Back up GRUB configuration before changing it.
-                        if [ ! -f /etc/default/grub.backup ]; then
-                            sudo -n cp /etc/default/grub /etc/default/grub.backup
-                        fi
-
-                        # Configure GRUB to boot kernel 6.8 by default.
-                        sudo -n sed -i \
-                            's/^GRUB_DEFAULT=.*/GRUB_DEFAULT="Advanced options for Ubuntu>Ubuntu, with Linux 6.8.0-1008-aws"/' \
-                            /etc/default/grub
-
-                        sudo -n update-grub
-
-                        echo "GRUB configured for kernel $TARGET_KERNEL."
-
-                        # Check the kernel currently running.
-                        CURRENT_KERNEL=$(uname -r)
-                        echo "Currently running kernel: $CURRENT_KERNEL"
-
-                        if [ "$CURRENT_KERNEL" != "$TARGET_KERNEL" ]; then
-                            echo "ACTION REQUIRED: Kernel $TARGET_KERNEL is installed and configured."
-                            echo "The EC2 instance must be rebooted to activate it."
-                            echo "Reboot the instance during an approved maintenance window,"
-                            echo "then rerun the Jenkins pipeline."
-                            exit 1
-                        fi
-
-                        echo "Kernel verification passed: $CURRENT_KERNEL"
-
                         # Install MongoDB only if mongod is missing.
                         if ! command -v mongod >/dev/null 2>&1; then
                             echo "MongoDB is missing. Installing MongoDB 8.0..."
