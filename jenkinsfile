@@ -125,8 +125,52 @@ pipeline {
 
                         mongod --version | head -n 2
 
-                        # Check AWS CLI and the EC2 IAM identity.
+                        # Install AWS CLI v2 only if it is missing
+                        if ! command -v aws >/dev/null 2>&1; then
+                            echo "AWS CLI is missing. Installing AWS CLI v2..."
+
+                            # Install curl only if missing
+                            if ! command -v curl >/dev/null 2>&1; then
+                                sudo apt-get update
+                                sudo apt-get install -y curl
+                            fi
+
+                            # Install unzip only if missing
+                            if ! command -v unzip >/dev/null 2>&1; then
+                                sudo apt-get update
+                                sudo apt-get install -y unzip
+                            fi
+
+                            ARCH="$(uname -m)"
+
+                            case "$ARCH" in
+                                x86_64)
+                                    AWS_URL="https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip"
+                                    ;;
+                                aarch64|arm64)
+                                    AWS_URL="https://awscli.amazonaws.com/awscli-exe-linux-aarch64.zip"
+                                    ;;
+                                *)
+                                    echo "Unsupported architecture: $ARCH"
+                                    exit 1
+                                    ;;
+                            esac
+
+                            TMP_DIR="$(mktemp -d)"
+                            trap 'rm -rf "$TMP_DIR"' EXIT
+
+                            curl -fsSL "$AWS_URL" -o "$TMP_DIR/awscliv2.zip"
+                            unzip -q "$TMP_DIR/awscliv2.zip" -d "$TMP_DIR"
+                            sudo "$TMP_DIR/aws/install"
+
+                            echo "AWS CLI installation completed."
+                        else
+                            echo "AWS CLI is already installed. Skipping installation."
+                        fi
+
                         aws --version
+
+                        # Verify EC2 IAM role credentials
                         aws sts get-caller-identity
 
                         # Check Nginx.
