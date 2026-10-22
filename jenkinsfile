@@ -26,10 +26,12 @@ pipeline {
     stages {
 
         // 1. Check requirements BEFORE checkout
+        
         stage('Requirements Check') {
             steps {
                 echo 'Checking Jenkins agent requirements...'
 
+                // Jenkins agent requirements
                 sh '''
                     set -eu
 
@@ -52,96 +54,128 @@ pipeline {
                         set -eu
 
                         ssh -o StrictHostKeyChecking=accept-new \
-                          "$EC2_USER@$EC2_HOST" 'bash -s' <<'REMOTE'
+                            "$EC2_USER@$EC2_HOST" 'bash -s' <<'REMOTE'
                         set -eu
 
                         echo "Checking EC2 requirements..."
 
                         sudo -n true
 
-                        sudo -n apt-get update -y
-                        sudo -n apt-get install -y \
-                          awscli curl gnupg ca-certificates nginx
+                        # Install base packages only when a required
+                        # command is missing.
+                        NEEDS_APT=0
 
-                        # Install Node.js 20 if missing or too old.
+                        for CMD in curl gpg nginx; do
+                            if ! command -v "$CMD" >/dev/null 2>&1; then
+                                echo "$CMD is missing."
+                                NEEDS_APT=1
+                            fi
+                        done
+
+                        if ! command -v unzip >/dev/null 2>&1; then
+                            echo "unzip is missing."
+                            NEEDS_APT=1
+                        fi
+
+                        if [ "$NEEDS_APT" -eq 1 ]; then
+                            sudo -n apt-get update -y
+
+                            # Install only missing packages.
+                            for PKG in curl gnupg ca-certificates nginx unzip; do
+                                case "$PKG" in
+                                    curl) CMD=curl ;;
+                                    gnupg) CMD=gpg ;;
+                                    ca-certificates) CMD=update-ca-certificates ;;
+                                    nginx) CMD=nginx ;;
+                                    unzip) CMD=unzip ;;
+                                esac
+
+                                if ! command -v "$CMD" >/dev/null 2>&1; then
+                                    sudo -n apt-get install -y "$PKG"
+                                fi
+                            done
+                        else
+                            echo "Base packages already installed. Skipping."
+                        fi
+
+                        # Install Node.js 20 only if missing or too old.
                         NODE_MAJOR=0
 
                         if command -v node >/dev/null 2>&1; then
                             NODE_MAJOR=$(node -p \
-                              "Number(process.versions.node.split('.')[0])")
+                                "Number(process.versions.node.split('.')[0])")
                         fi
 
                         if [ "$NODE_MAJOR" -lt 20 ]; then
+                            echo "Installing/upgrading Node.js to version 20..."
+
                             curl -fsSL \
-                              https://deb.nodesource.com/setup_20.x \
-                              -o /tmp/node-setup.sh
+                                https://deb.nodesource.com/setup_20.x \
+                                -o /tmp/node-setup.sh
 
                             sudo -n bash /tmp/node-setup.sh
                             sudo -n apt-get install -y nodejs
                             rm -f /tmp/node-setup.sh
+                        else
+                            echo "Node.js $NODE_MAJOR already meets requirements."
                         fi
 
                         node --version
                         npm --version
 
-
-                        # Install PM2 if missing.
+                        # Install PM2 only if missing.
                         if ! command -v pm2 >/dev/null 2>&1; then
+                            echo "Installing PM2..."
                             sudo -n npm install -g pm2
+                        else
+                            echo "PM2 already installed. Skipping."
                         fi
 
                         pm2 --version
 
-                        # Install MongoDB Server if missing.
+                        # Install MongoDB only if mongod is missing.
                         if ! command -v mongod >/dev/null 2>&1; then
+                            echo "MongoDB is missing. Installing MongoDB 8.0..."
+
                             . /etc/os-release
 
                             if [ "$ID" != "ubuntu" ] ||
-                               [ "$VERSION_ID" != "24.04" ]; then
-                                echo "ERROR: Automatic MongoDB installation supports Ubuntu 24.04 only."
+                            [ "$VERSION_ID" != "24.04" ]; then
+                                echo "ERROR: MongoDB installation supports Ubuntu 24.04 only."
                                 exit 1
                             fi
 
                             ARCH=$(dpkg --print-architecture)
 
                             if [ "$ARCH" != "amd64" ] &&
-                               [ "$ARCH" != "arm64" ]; then
+                            [ "$ARCH" != "arm64" ]; then
                                 echo "ERROR: Unsupported architecture: $ARCH"
                                 exit 1
                             fi
 
                             curl -fsSL \
-                              https://pgp.mongodb.com/server-8.0.asc |
-                              sudo -n gpg --dearmor --yes \
-                              -o /usr/share/keyrings/mongodb-server-8.0.gpg
+                                https://pgp.mongodb.com/server-8.0.asc |
+                                sudo -n gpg --dearmor --yes \
+                                -o /usr/share/keyrings/mongodb-server-8.0.gpg
 
                             echo "deb [ arch=$ARCH signed-by=/usr/share/keyrings/mongodb-server-8.0.gpg ] https://repo.mongodb.org/apt/ubuntu noble/mongodb-org/8.0 multiverse" |
-                              sudo -n tee \
-                              /etc/apt/sources.list.d/mongodb-org-8.0.list
+                                sudo -n tee \
+                                /etc/apt/sources.list.d/mongodb-org-8.0.list \
+                                >/dev/null
 
                             sudo -n apt-get update -y
                             sudo -n apt-get install -y mongodb-org
+                        else
+                            echo "MongoDB already installed. Skipping."
                         fi
 
                         mongod --version | head -n 2
 
-                        # Install AWS CLI v2 only if it is missing
+                        # Install AWS CLI v2 only if missing.
                         if ! command -v aws >/dev/null 2>&1; then
                             echo "AWS CLI is missing. Installing AWS CLI v2..."
 
-                            # Install curl only if missing
-                            if ! command -v curl >/dev/null 2>&1; then
-                                sudo apt-get update
-                                sudo apt-get install -y curl
-                            fi
-
-                            # Install unzip only if missing
-                            if ! command -v unzip >/dev/null 2>&1; then
-                                sudo apt-get update
-                                sudo apt-get install -y unzip
-                            fi
-
-                            ARCH="$(uname -m)"
+                            ARCH=$(uname -m)
 
                             case "$ARCH" in
                                 x86_64)
@@ -151,42 +185,47 @@ pipeline {
                                     AWS_URL="https://awscli.amazonaws.com/awscli-exe-linux-aarch64.zip"
                                     ;;
                                 *)
-                                    echo "Unsupported architecture: $ARCH"
+                                    echo "ERROR: Unsupported architecture: $ARCH"
                                     exit 1
                                     ;;
                             esac
 
-                            TMP_DIR="$(mktemp -d)"
+                            TMP_DIR=$(mktemp -d)
                             trap 'rm -rf "$TMP_DIR"' EXIT
 
-                            curl -fsSL "$AWS_URL" -o "$TMP_DIR/awscliv2.zip"
-                            unzip -q "$TMP_DIR/awscliv2.zip" -d "$TMP_DIR"
-                            sudo "$TMP_DIR/aws/install"
+                            curl -fsSL "$AWS_URL" \
+                                -o "$TMP_DIR/awscliv2.zip"
 
-                            echo "AWS CLI installation completed."
+                            unzip -q "$TMP_DIR/awscliv2.zip" \
+                                -d "$TMP_DIR"
+
+                            sudo -n "$TMP_DIR/aws/install"
+
+                            rm -rf "$TMP_DIR"
+                            trap - EXIT
                         else
-                            echo "AWS CLI is already installed. Skipping installation."
+                            echo "AWS CLI already installed. Skipping."
                         fi
 
                         aws --version
 
-                        # Verify EC2 IAM role credentials
+                        # Verify AWS credentials and EC2 IAM role.
                         aws sts get-caller-identity
 
-                        # Check Nginx.
+                        # Verify Nginx.
                         nginx -v
 
                         # Prepare deployment directories.
                         sudo -n mkdir -p \
-                          /var/www/html/ec2_project/app \
-                          /var/www/html/ec2_project/api
+                            /var/www/html/ec2_project/app \
+                            /var/www/html/ec2_project/api
 
                         sudo -n chown -R \
-                          "$USER":"$(id -gn)" \
-                          /var/www/html/ec2_project
+                            "$USER":"$(id -gn)" \
+                            /var/www/html/ec2_project
 
-                        echo "Requirements check completed."
-REMOTE
+                        echo "Requirements check completed successfully."
+                        REMOTE
                     '''
                 }
             }
