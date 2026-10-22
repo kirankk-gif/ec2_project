@@ -225,7 +225,7 @@ pipeline {
                             /var/www/html/ec2_project
 
                         echo "Requirements check completed successfully."
-                        REMOTE
+REMOTE
                     '''
                 }
             }
