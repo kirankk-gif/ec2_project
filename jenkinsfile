@@ -132,6 +132,27 @@ pipeline {
                         fi
 
                         pm2 --version
+                        
+                        # Install Linux kernel 6.8 AWS only if missing.
+                        if ! dpkg -s linux-image-6.8.0-1008-aws >/dev/null 2>&1; then
+                            echo "Linux kernel 6.8 AWS is missing. Installing..."
+
+                            sudo -n apt-get update -y
+                            sudo -n apt-get install -y linux-image-6.8.0-1008-aws
+
+                            echo "Linux kernel 6.8 AWS installed."
+                        else
+                            echo "Linux kernel 6.8 AWS is already installed. Skipping."
+                        fi
+
+                        # Check the currently running kernel.
+                        KERNEL=$(uname -r)
+                        echo "Currently running kernel: $KERNEL"
+
+                        if [[ "$KERNEL" != 6.8.* ]]; then
+                            echo "WARNING: Kernel 6.8 is installed but not running."
+                            echo "A reboot and bootloader configuration may be required."
+                        fi
 
                         # Install MongoDB only if mongod is missing.
                         if ! command -v mongod >/dev/null 2>&1; then
