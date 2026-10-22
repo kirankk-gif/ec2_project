@@ -43,21 +43,25 @@ pipeline {
                             else
                                 echo "Ensuring kernel package is installed..."
 
-                                ssh "$TARGET" "
-                                    set -e
-                                    if ! dpkg-query -W -f='\\${Status}' linux-image-$KERNEL 2>/dev/null |
-                                        grep -q 'install ok installed'; then
-                                        sudo -n apt-get update -y
-                                        sudo -n apt-get install -y linux-image-$KERNEL
-                                    fi
 
-                                    test -f /boot/vmlinuz-$KERNEL
+                            ssh "$TARGET" 'bash -s' <<'REMOTE'
+                            set -eu
 
-                                    sudo -n cp -n /etc/default/grub /etc/default/grub.backup
+                            KERNEL="6.8.0-1008-aws"
 
-                                    sudo -n sed -i 's|^GRUB_DEFAULT=.*|GRUB_DEFAULT=\"Advanced options for Ubuntu>Ubuntu, with Linux $KERNEL\"|' /etc/default/grub
+                            sudo -n cp -n /etc/default/grub /etc/default/grub.backup
 
-                                    sudo -n update-grub
+                            sudo -n sed -i \
+                            's|^GRUB_DEFAULT=.*|GRUB_DEFAULT="Advanced options for Ubuntu>Ubuntu, with Linux 6.8.0-1008-aws"|' \
+                            /etc/default/grub
+
+                            echo "Configured GRUB default:"
+                            grep '^GRUB_DEFAULT=' /etc/default/grub
+
+                            sudo -n grub-script-check /etc/default/grub
+                            sudo -n update-grub
+REMOTE
+
                                 "
 
                                 echo "Scheduling reboot..."
