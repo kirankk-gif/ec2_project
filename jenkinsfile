@@ -10,7 +10,7 @@ pipeline {
     environment {
         EC2_HOST       = '3.106.194.176'
         EC2_USER       = 'ubuntu'
-        SSH_CREDENTIAL = 'ec2-ssh-key'
+        SSH_CREDENTIAL = 'ssh-newec2-key'
 
         FRONTEND_DIR   = '/var/www/html/ec2_project/app'
         BACKEND_DIR    = '/var/www/html/ec2_project/api'
@@ -83,6 +83,7 @@ pipeline {
 
                         node --version
                         npm --version
+
 
                         # Install PM2 if missing.
                         if ! command -v pm2 >/dev/null 2>&1; then
