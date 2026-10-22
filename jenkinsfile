@@ -645,4 +645,3 @@ REMOTE
             echo 'Jenkins pipeline finished.'
         }
     }
-}
