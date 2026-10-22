@@ -23,104 +23,107 @@ pipeline {
         HEALTH_PATH    = '/api/health'
     }
 
+    
     stages {
-        
             stage('Kernel Setup and Reboot') {
                 steps {
                     sshagent(credentials: ['ssh-newec2-key']) {
                         sh '''
-                            set -eu
+        set -eu
 
-                            TARGET="$EC2_USER@$EC2_HOST"
-                            KERNEL="6.8.0-1008-aws"
+        TARGET="$EC2_USER@$EC2_HOST"
+        KERNEL="6.8.0-1008-aws"
 
-                            echo "Checking current EC2 kernel..."
-                            CURRENT=$(ssh -o BatchMode=yes -o ConnectTimeout=10 "$TARGET" 'uname -r')
-                            echo "Current kernel: $CURRENT"
+        echo "Checking current EC2 kernel..."
+        CURRENT=$(ssh -o BatchMode=yes -o ConnectTimeout=10 "$TARGET" 'uname -r')
+        echo "Current kernel: $CURRENT"
 
-                            if [ "$CURRENT" = "$KERNEL" ]; then
-                                echo "Required kernel is already running. No reboot needed."
-                            else
-                                echo "Ensuring kernel package is installed..."
+        if [ "$CURRENT" != "$KERNEL" ]; then
+            echo "Installing/configuring target kernel if needed..."
 
+            ssh "$TARGET" 'bash -s' <<'REMOTE'
+        set -eu
 
-                            ssh "$TARGET" 'bash -s' <<'REMOTE'
-                            set -eu
+        KERNEL="6.8.0-1008-aws"
 
-                            KERNEL="6.8.0-1008-aws"
+        if ! dpkg-query -W -f='${Status}' "linux-image-$KERNEL" 2>/dev/null |
+            grep -q 'install ok installed'; then
+            sudo -n apt-get update -y
+            sudo -n apt-get install -y "linux-image-$KERNEL"
+        fi
 
-                            sudo -n cp -n /etc/default/grub /etc/default/grub.backup
+        test -f "/boot/vmlinuz-$KERNEL"
 
-                            sudo -n sed -i \
-                            's|^GRUB_DEFAULT=.*|GRUB_DEFAULT="Advanced options for Ubuntu>Ubuntu, with Linux 6.8.0-1008-aws"|' \
-                            /etc/default/grub
+        if [ ! -f /etc/default/grub.backup ]; then
+            sudo -n cp /etc/default/grub /etc/default/grub.backup
+        fi
 
-                            echo "Configured GRUB default:"
-                            grep '^GRUB_DEFAULT=' /etc/default/grub
+        sudo -n sed -i \
+            's|^GRUB_DEFAULT=.*|GRUB_DEFAULT="Advanced options for Ubuntu>Ubuntu, with Linux 6.8.0-1008-aws"|' \
+            /etc/default/grub
 
-                            sudo -n grub-script-check /etc/default/grub
-                            sudo -n update-grub
+        sudo -n grub-script-check /etc/default/grub
+        sudo -n update-grub
+
+        echo "GRUB configuration updated successfully."
 REMOTE
 
-                                "
+            echo "Scheduling reboot..."
+            REBOOT_UNIT="jenkins-kernel-reboot-$(date +%s)"
+            ssh "$TARGET" \
+                "sudo -n systemd-run --unit=$REBOOT_UNIT --on-active=15s /usr/sbin/reboot"
 
-                                echo "Scheduling reboot..."
-                                ssh "$TARGET" \
-                                    'sudo -n systemd-run --unit="jenkins-kernel-reboot-$(date +%s)" --on-active=5s /usr/sbin/reboot'
+            echo "Waiting for SSH to disconnect..."
+            DOWN=false
 
-                                # Wait for SSH to disconnect, confirming reboot began.
-                                DOWN=false
-                                for i in $(seq 1 12); do
-                                    sleep 5
-                                    if ! ssh -o BatchMode=yes \
-                                            -o ConnectTimeout=5 \
-                                            -o ConnectionAttempts=1 \
-                                            "$TARGET" 'true' 2>/dev/null; then
-                                        DOWN=true
-                                        break
-                                    fi
-                                done
+            for i in $(seq 1 12); do
+                sleep 5
+                if ! ssh -o BatchMode=yes -o ConnectTimeout=5 \
+                        -o ConnectionAttempts=1 "$TARGET" 'true' 2>/dev/null; then
+                    DOWN=true
+                    break
+                fi
+            done
 
-                                if [ "$DOWN" != true ]; then
-                                    echo "ERROR: EC2 did not disconnect as expected."
-                                    exit 1
-                                fi
+            if [ "$DOWN" != true ]; then
+                echo "ERROR: Reboot was not detected."
+                exit 1
+            fi
 
-                                echo "Reboot detected. Waiting for SSH..."
+            echo "Waiting for SSH to return..."
+            CONNECTED=false
 
-                                # Wait up to 5 minutes for SSH to return.
-                                CONNECTED=false
-                                for i in $(seq 1 60); do
-                                    sleep 5
-                                    if ssh -o BatchMode=yes \
-                                        -o ConnectTimeout=5 \
-                                        -o ConnectionAttempts=1 \
-                                        "$TARGET" 'true' 2>/dev/null; then
-                                        CONNECTED=true
-                                        break
-                                    fi
-                                    echo "Waiting for EC2... attempt $i/60"
-                                done
+            for i in $(seq 1 60); do
+                sleep 5
+                if ssh -o BatchMode=yes -o ConnectTimeout=5 \
+                        -o ConnectionAttempts=1 "$TARGET" 'true' 2>/dev/null; then
+                    CONNECTED=true
+                    break
+                fi
+                echo "Waiting for EC2... attempt $i/60"
+            done
 
-                                if [ "$CONNECTED" != true ]; then
-                                    echo "ERROR: SSH did not return within 5 minutes."
-                                    exit 1
-                                fi
-                            fi
+            if [ "$CONNECTED" != true ]; then
+                echo "ERROR: SSH did not return within 5 minutes."
+                exit 1
+            fi
+        fi
 
-                            CURRENT=$(ssh -o BatchMode=yes -o ConnectTimeout=10 "$TARGET" 'uname -r')
-                            echo "Verified running kernel: $CURRENT"
+        CURRENT=$(ssh -o BatchMode=yes -o ConnectTimeout=10 "$TARGET" 'uname -r')
+        echo "Verified running kernel: $CURRENT"
 
-                            if [ "$CURRENT" != "$KERNEL" ]; then
-                                echo "ERROR: Expected $KERNEL but found $CURRENT."
-                                exit 1
-                            fi
+        if [ "$CURRENT" != "$KERNEL" ]; then
+            echo "ERROR: Expected $KERNEL but found $CURRENT"
+            exit 1
+        fi
 
-                            echo "Kernel verification passed."
+        echo "Kernel verification passed."
                         '''
                     }
                 }
             }
+        }
+
 
         // 1. Check requirements BEFORE checkout
         
