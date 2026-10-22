@@ -8,7 +8,7 @@ pipeline {
     }
 
     environment {
-        EC2_HOST       = '3.106.194.176'
+        EC2_HOST       = '15.135.220.172'
         EC2_USER       = 'ubuntu'
         SSH_CREDENTIAL = 'ssh-newec2-key'
 
@@ -534,7 +534,7 @@ REMOTE
     post {
         success {
             echo 'Deployment succeeded!'
-            echo 'Website: http://3.106.194.176/'
+            echo 'Website: http://15.135.220.172/'
         }
 
         failure {
